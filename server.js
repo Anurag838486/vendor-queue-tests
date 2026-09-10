@@ -72,12 +72,6 @@ app.get('/api/requests/summary', (req, res) => {
   STATES.forEach((s) => { summary[s] = 0; });
   req.store.requests.forEach((r) => {
     summary[r.state] += 1;
-    // BUG: IN_PROGRESS bucket double-counts - anything that is not yet
-    // COMPLETED also gets tallied into IN_PROGRESS, so the column counts
-    // shown on the board never match the number of cards actually in it.
-    if (r.state !== 'COMPLETED') {
-      summary.IN_PROGRESS += 1;
-    }
   });
   res.json(summary);
 });
@@ -91,48 +85,37 @@ app.get('/api/requests/:id', (req, res) => {
 app.post('/api/requests', (req, res) => {
   const { checkType, candidateName } = req.body;
 
-  // BUG: missing required-field validation - an empty/blank candidateName
-  // is accepted instead of being rejected with 400.
-  // BUG: missing enum validation - checkType is not checked against
-  // CHECK_TYPES, so any arbitrary string is accepted.
+  if (!CHECK_TYPES.includes(checkType)) {
+    return res.status(400).json({ error: `checkType must be one of ${CHECK_TYPES.join(', ')}` });
+  }
+
+  const trimmedName = typeof candidateName === 'string' ? candidateName.trim() : '';
+  if (!trimmedName) {
+    return res.status(400).json({ error: 'candidateName is required and cannot be blank' });
+  }
 
   const request = {
     id: req.store.nextId++,
     checkType,
-    // BUG: candidateName is stored as-is - leading/trailing whitespace
-    // is not trimmed, so "  Ana  " and "Ana" are treated as different
-    // candidates downstream.
-    candidateName,
+    candidateName: trimmedName,
     state: 'REQUESTED',
     vendorId: null
   };
   req.store.requests.push(request);
-  // BUG: wrong HTTP status - a successful creation should return 201,
-  // not 200.
-  res.json(request);
+  res.status(201).json(request);
 });
 
 app.patch('/api/requests/:id/transition', (req, res) => {
   const request = req.store.requests.find((r) => r.id === Number(req.params.id));
-  const { to } = req.body;
+  if (!request) return res.status(404).json({ error: 'Request not found' });
 
-  // BUG: no 404 guard - if the id doesn't exist, `request` is undefined
-  // and the next line throws, so Express returns a bare 500 instead of a
-  // clean 404.
+  const { to } = req.body;
   const fromIdx = STATES.indexOf(request.state);
   const toIdx = STATES.indexOf(to);
 
-  let allowed = false;
-  // BUG: shortcut lets ANY state jump straight to COMPLETED, skipping
-  // whatever states sit in between (e.g. REQUESTED -> COMPLETED directly).
-  if (to === 'COMPLETED') {
-    allowed = true;
-  } else if (Math.abs(toIdx - fromIdx) === 1) {
-    // BUG: this also allows moving backward one step (e.g.
-    // IN_PROGRESS -> ASSIGNED, or COMPLETED -> IN_PROGRESS), which the
-    // spec says must never happen.
-    allowed = true;
-  }
+  // Only the single immediate next state (forward by exactly one step) is
+  // allowed. No skipping ahead, no moving backward, no invalid/unknown state.
+  const allowed = toIdx !== -1 && toIdx === fromIdx + 1;
 
   if (!allowed) {
     return res.status(400).json({ error: `Cannot transition from ${request.state} to ${to}` });
@@ -147,19 +130,23 @@ app.patch('/api/requests/:id/assign', (req, res) => {
   if (!request) return res.status(404).json({ error: 'Request not found' });
 
   const { vendorId } = req.body;
-  // BUG: vendorId is documented as "null or an existing vendor id", and the
-  // UI's "Unassigned" option submits vendorId: null to clear an assignment
-  // - but null is looked up in `vendors` exactly like any other id, never
-  // matches, and falls into the "Unknown vendor" 400 below. Unassigning a
-  // vendor is therefore impossible; it always fails instead of clearing
-  // request.vendorId.
+
+  if (request.state === 'COMPLETED') {
+    return res.status(400).json({ error: 'Cannot reassign a vendor on a COMPLETED request' });
+  }
+
+  if (vendorId === null) {
+    request.vendorId = null;
+    return res.json(request);
+  }
+
   const vendor = req.store.vendors.find((v) => v.id === vendorId);
   if (!vendor) {
     return res.status(400).json({ error: 'Unknown vendor' });
   }
-  // BUG: an inactive vendor (active: false) is accepted without complaint.
-  // BUG: no guard for request.state === 'COMPLETED' - a completed request
-  // can still be reassigned, which the spec forbids.
+  if (!vendor.active) {
+    return res.status(400).json({ error: 'Cannot assign an inactive vendor' });
+  }
 
   request.vendorId = vendorId;
   res.json(request);
