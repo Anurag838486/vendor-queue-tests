@@ -15,31 +15,34 @@ function showToast(message) {
 }
 
 function vendorOptionsHtml(currentVendorId) {
-  // BUG: inactive vendors are listed right alongside active ones with no
-  // filtering and no visual distinction.
-  const opts = ['<option value="">Unassigned</option>']
-    .concat(vendors.map((v) => `<option value="${v.id}">${v.name}</option>`));
+  const unassignedSelected = !currentVendorId ? ' selected' : '';
+  const opts = [`<option value=""${unassignedSelected}>Unassigned</option>`]
+    .concat(
+      vendors
+        .filter((v) => v.active || v.id === currentVendorId)
+        .map((v) => {
+          const selected = v.id === currentVendorId ? ' selected' : '';
+          return `<option value="${v.id}"${selected}>${v.name}</option>`;
+        })
+    );
   return opts.join('');
 }
 
 function cardHtml(r) {
-  const stateButtons = STATES.map((s) => {
-    // BUG: only the button matching the request's OWN current state is
-    // disabled. Every other state's button stays clickable, including
-    // states that are not the single valid "next" state.
-    const disabled = s === r.state ? 'disabled' : '';
+  const currentIdx = STATES.indexOf(r.state);
+  const stateButtons = STATES.map((s, idx) => {
+    const isValidNext = idx === currentIdx + 1;
+    const disabled = isValidNext ? '' : 'disabled';
     return `<button class="state-btn" data-id="${r.id}" data-to="${s}" ${disabled}>${s}</button>`;
   }).join('');
 
-  // BUG: the vendor-select is never disabled, even once the request has
-  // reached the terminal COMPLETED state - the spec requires it to be
-  // disabled at that point, same as the state-transition buttons are.
+  const selectDisabled = r.state === 'COMPLETED' ? 'disabled' : '';
 
   return `
     <div class="card" data-id="${r.id}">
       <div class="card-title">${r.candidateName}</div>
       <div class="card-sub">${r.checkType}</div>
-      <select class="vendor-select" data-id="${r.id}">${vendorOptionsHtml(r.vendorId)}</select>
+      <select class="vendor-select" data-id="${r.id}" ${selectDisabled}>${vendorOptionsHtml(r.vendorId)}</select>
       <div class="state-buttons">${stateButtons}</div>
     </div>
   `;
@@ -80,11 +83,12 @@ async function onTransition(btn) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to })
   });
-  // BUG: toast always reports success, even when the API responded with
-  // a 400 for an invalid transition.
-  showToast(`Moved to ${to}`);
-  // BUG: the board is not reloaded after a transition, so the card stays
-  // in its old column until the page is manually refreshed.
+  if (res.ok) {
+    showToast(`Moved to ${to}`);
+    await loadBoard();
+  } else {
+    showToast('Failed to transition request');
+  }
 }
 
 async function onAssign(sel) {
@@ -94,9 +98,11 @@ async function onAssign(sel) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ vendorId: sel.value || null })
   });
-  // BUG: toast always reports success, even when the API responded with a
-  // 400 (inactive vendor, unknown vendor, or request already COMPLETED).
-  showToast('Vendor assigned');
+  if (res.ok) {
+    showToast('Vendor assigned');
+  } else {
+    showToast('Failed to assign vendor');
+  }
   await loadBoard();
 }
 
